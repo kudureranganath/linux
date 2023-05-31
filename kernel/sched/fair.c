@@ -7690,6 +7690,54 @@ static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, bool 
 }
 
 /*
+ * For the multiple-LLC per node case, make sure to try the other LLC's if the
+ * local LLC comes up empty.
+ */
+static int
+select_idle_node(struct task_struct *p, struct sched_domain *sd, int target)
+{
+	struct sched_domain *parent = sd->parent;
+	struct sched_group *sg;
+	int nr = INT_MAX;
+
+	/* Make sure to not cross nodes. */
+	if (!parent || parent->flags & SD_NUMA)
+		return -1;
+
+	if (sched_feat(SIS_UTIL)) {
+		struct sched_domain_shared *sd_share = parent->shared;
+
+		if (sd_share) {
+			nr = READ_ONCE(sd_share->nr_idle_scan);
+			/*
+			 * Overloaded node is unlikely to have idle cpu/core.
+			 * Account for the local LLC we've just searched.
+			 */
+			if (--nr <= 0)
+				return -1;
+		}
+	}
+
+	/*
+	 * Since the local group has already been scanned, start from
+	 * parent->groups->next skipping the local sd_llc.
+	 */
+	for (sg = parent->groups->next; sg != parent->groups; sg = sg->next) {
+		int i, cpu = cpumask_first(sched_group_span(sg));
+		struct sched_domain *sd_child = per_cpu(sd_llc, cpu);
+
+		i = select_idle_cpu(p, sd_child, test_idle_cores(cpu), cpu);
+		if ((unsigned)i < nr_cpumask_bits)
+			return i;
+
+		if (!--nr)
+			break;
+	}
+
+	return -1;
+}
+
+/*
  * Scan the asym_capacity domain for idle CPUs; pick the first idle one on which
  * the task fits. If no CPU is big enough, but there are idle ones, try to
  * maximize capacity.
@@ -7872,6 +7920,12 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 	i = select_idle_cpu(p, sd, has_idle_core, target);
 	if ((unsigned)i < nr_cpumask_bits)
 		return i;
+
+	if (sched_feat(SIS_NODE)) {
+		i = select_idle_node(p, sd, target);
+		if ((unsigned)i < nr_cpumask_bits)
+			return i;
+	}
 
 	/*
 	 * For cluster machines which have lower sharing cache like L2 or
