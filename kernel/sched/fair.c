@@ -5825,6 +5825,12 @@ static inline int throttled_lb_pair(struct task_group *tg,
 	       throttled_hierarchy(dest_cfs_rq);
 }
 
+void init_cfs_throttle_work(struct task_struct *p)
+{
+	INIT_LIST_HEAD(&p->throttle_node);
+}
+
+static void enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags);
 static int tg_unthrottle_up(struct task_group *tg, void *data)
 {
 	struct rq *rq = data;
@@ -5832,6 +5838,8 @@ static int tg_unthrottle_up(struct task_group *tg, void *data)
 
 	cfs_rq->throttle_count--;
 	if (!cfs_rq->throttle_count) {
+		struct task_struct *p, *tmp;
+
 		cfs_rq->throttled_clock_pelt_time += rq_clock_pelt(rq) -
 					     cfs_rq->throttled_clock_pelt;
 
@@ -5849,6 +5857,13 @@ static int tg_unthrottle_up(struct task_group *tg, void *data)
 
 			cfs_rq->throttled_clock_self_time += delta;
 		}
+
+		/* Re-enqueue the tasks that have been throttled at this level. */
+		list_for_each_entry_safe(p, tmp, &cfs_rq->throttled_limbo_list, throttle_node) {
+			list_del_init(&p->throttle_node);
+			enqueue_task_fair(rq, p, ENQUEUE_WAKEUP);
+		}
+
 	}
 
 	return 0;
@@ -6563,6 +6578,7 @@ static void init_cfs_rq_runtime(struct cfs_rq *cfs_rq)
 	cfs_rq->runtime_enabled = 0;
 	INIT_LIST_HEAD(&cfs_rq->throttled_list);
 	INIT_LIST_HEAD(&cfs_rq->throttled_csd_list);
+	INIT_LIST_HEAD(&cfs_rq->throttled_limbo_list);
 }
 
 void start_cfs_bandwidth(struct cfs_bandwidth *cfs_b)
