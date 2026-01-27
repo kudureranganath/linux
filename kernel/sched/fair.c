@@ -7636,10 +7636,9 @@ static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, bool 
 	if (sched_feat(SIS_UTIL)) {
 		sd_share = rcu_dereference_all(per_cpu(sd_llc_shared, target));
 		if (sd_share) {
-			/* because !--nr is the condition to stop scan */
-			nr = READ_ONCE(sd_share->nr_idle_scan) + 1;
+			nr = READ_ONCE(sd_share->nr_idle_scan);
 			/* overloaded LLC is unlikely to have idle cpu/core */
-			if (nr == 1)
+			if (!nr)
 				return -1;
 		}
 	}
@@ -7657,11 +7656,11 @@ static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, bool 
 					if ((unsigned int)i < nr_cpumask_bits)
 						return i;
 				} else {
-					if (--nr <= 0)
-						return -1;
 					idle_cpu = __select_idle_cpu(cpu, p);
 					if ((unsigned int)idle_cpu < nr_cpumask_bits)
 						return idle_cpu;
+					if (!--nr)
+						return -1;
 				}
 			}
 			cpumask_andnot(cpus, cpus, sched_group_span(sg));
@@ -7675,11 +7674,11 @@ static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, bool 
 				return i;
 
 		} else {
-			if (--nr <= 0)
-				return -1;
 			idle_cpu = __select_idle_cpu(cpu, p);
 			if ((unsigned int)idle_cpu < nr_cpumask_bits)
 				break;
+			if (!--nr)
+				return -1;
 		}
 	}
 
