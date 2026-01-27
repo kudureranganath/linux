@@ -11072,9 +11072,11 @@ static int __update_idle_cpu_scan(struct sched_domain *sd,
 }
 
 static void update_idle_cpu_scan(struct lb_env *env,
-				 unsigned long sum_util)
+				 unsigned long sum_util,
+				 unsigned int nr_groups)
 {
 	struct sched_domain_shared *sd_share;
+	struct sched_domain *sd = env->sd;
 	int nr_idle_scan, nr_scan_limit;
 
 	/*
@@ -11089,14 +11091,22 @@ static void update_idle_cpu_scan(struct lb_env *env,
 		return;
 
 	nr_scan_limit = per_cpu(sd_llc_size, env->dst_cpu);
-	if (env->sd->span_weight != nr_scan_limit)
+	if (sd->span_weight < nr_scan_limit)
 		return;
 
-	sd_share = rcu_dereference_all(per_cpu(sd_llc_shared, env->dst_cpu));
+	sd_share = sd->shared;
 	if (!sd_share)
 		return;
 
-	nr_idle_scan = __update_idle_cpu_scan(env->sd, sum_util, nr_scan_limit);
+	/*
+	 * For !SD_SHARE_LLC domain with sd->shared attached, "nr_idle_scan"
+	 * is used by SIS_NODE which traverses sd->groups. Set the
+	 * "nr_scan_limit" to nr_groups for these domains.
+	 */
+	if (!(sd->flags & SD_SHARE_LLC))
+		nr_scan_limit = nr_groups;
+
+	nr_idle_scan = __update_idle_cpu_scan(sd, sum_util, nr_scan_limit);
 	if (nr_idle_scan != sd_share->nr_idle_scan)
 		WRITE_ONCE(sd_share->nr_idle_scan, nr_idle_scan);
 }
@@ -11114,6 +11124,7 @@ static inline void update_sd_lb_stats(struct lb_env *env, struct sd_lb_stats *sd
 	struct sg_lb_stats tmp_sgs;
 	unsigned long sum_util = 0;
 	bool sg_overloaded = 0, sg_overutilized = 0;
+	int nr_groups = 0;
 
 	do {
 		struct sg_lb_stats *sgs = &tmp_sgs;
@@ -11142,6 +11153,7 @@ static inline void update_sd_lb_stats(struct lb_env *env, struct sd_lb_stats *sd
 
 		sum_util += sgs->group_util;
 		sg = sg->next;
+		++nr_groups;
 	} while (sg != env->sd->groups);
 
 	/*
@@ -11166,7 +11178,7 @@ static inline void update_sd_lb_stats(struct lb_env *env, struct sd_lb_stats *sd
 		set_rd_overutilized(env->dst_rq->rd, sg_overutilized);
 	}
 
-	update_idle_cpu_scan(env, sum_util);
+	update_idle_cpu_scan(env, sum_util, nr_groups);
 }
 
 /**
