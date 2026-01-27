@@ -11001,30 +11001,29 @@ sched_balance_find_dst_group(struct sched_domain *sd, struct task_struct *p, int
 	return idlest;
 }
 
-static void update_idle_cpu_scan(struct lb_env *env,
-				 unsigned long sum_util)
+
+/**
+ * __update_idle_cpu_scan - Returns the new SIS_UTIL bailout threshold based
+ * on the sum of utilization of all the CPUs in the sched_domain.
+ *
+ * @sd: The load balancing domain.
+ * @sum_util: Sum util of all CPUs in sd.
+ * @nr_scan_limit: Number of scannable units within sd.
+ *
+ * Returns: The new SIS_UTIL bailout threshold based on sum_util and
+ * nr_scan_limit. The threshold is calculated as:
+ *
+ *     (1 - ((sum_util * imbalance_pct) / (sd_span * 100)) ^ 2) * nr_scan_limit
+ *
+ * To avoid precision loss, all calculations are scaled to
+ * SCHED_CAPACITY_SCALE.
+ */
+static int __update_idle_cpu_scan(struct sched_domain *sd,
+				  unsigned long sum_util,
+				  int nr_scan_limit)
 {
-	struct sched_domain_shared *sd_share;
-	int llc_weight, pct;
+	int pct, sd_span = sd->span_weight;
 	u64 x, y, tmp;
-	/*
-	 * Update the number of CPUs to scan in LLC domain, which could
-	 * be used as a hint in select_idle_cpu(). The update of sd_share
-	 * could be expensive because it is within a shared cache line.
-	 * So the write of this hint only occurs during periodic load
-	 * balancing, rather than CPU_NEWLY_IDLE, because the latter
-	 * can fire way more frequently than the former.
-	 */
-	if (!sched_feat(SIS_UTIL) || env->idle == CPU_NEWLY_IDLE)
-		return;
-
-	llc_weight = per_cpu(sd_llc_size, env->dst_cpu);
-	if (env->sd->span_weight != llc_weight)
-		return;
-
-	sd_share = rcu_dereference_all(per_cpu(sd_llc_shared, env->dst_cpu));
-	if (!sd_share)
-		return;
 
 	/*
 	 * The number of CPUs to search drops as sum_util increases, when
@@ -11040,14 +11039,14 @@ static void update_idle_cpu_scan(struct lb_env *env,
 	 * y' is the ratio of CPUs to be scanned in the LLC domain,
 	 * and the number of CPUs to scan is calculated by:
 	 *
-	 * nr_scan = llc_weight * y'                                    [2]
+	 * nr_scan = nr_scan_limit * y'                                 [2]
 	 *
 	 * When x hits the threshold of overloaded, AKA, when
 	 * x = 100 / pct, y drops to 0. According to [1],
 	 * p should be SCHED_CAPACITY_SCALE * pct^2 / 10000
 	 *
 	 * Scale x by SCHED_CAPACITY_SCALE:
-	 * x' = sum_util / llc_weight;                                  [3]
+	 * x' = sum_util / sd->span_weight;                             [3]
 	 *
 	 * and finally [1] becomes:
 	 * y = SCHED_CAPACITY_SCALE -
@@ -11056,20 +11055,50 @@ static void update_idle_cpu_scan(struct lb_env *env,
 	 */
 	/* equation [3] */
 	x = sum_util;
-	do_div(x, llc_weight);
+	do_div(x, sd_span);
 
 	/* equation [4] */
-	pct = env->sd->imbalance_pct;
+	pct = sd->imbalance_pct;
 	tmp = x * x * pct * pct;
 	do_div(tmp, 10000 * SCHED_CAPACITY_SCALE);
 	tmp = min_t(long, tmp, SCHED_CAPACITY_SCALE);
 	y = SCHED_CAPACITY_SCALE - tmp;
 
 	/* equation [2] */
-	y *= llc_weight;
+	y *= nr_scan_limit;
 	do_div(y, SCHED_CAPACITY_SCALE);
-	if ((int)y != sd_share->nr_idle_scan)
-		WRITE_ONCE(sd_share->nr_idle_scan, (int)y);
+
+	return (int)y;
+}
+
+static void update_idle_cpu_scan(struct lb_env *env,
+				 unsigned long sum_util)
+{
+	struct sched_domain_shared *sd_share;
+	int nr_idle_scan, nr_scan_limit;
+
+	/*
+	 * Update the number of CPUs to scan in LLC domain, which could
+	 * be used as a hint in select_idle_cpu(). The update of sd_share
+	 * could be expensive because it is within a shared cache line.
+	 * So the write of this hint only occurs during periodic load
+	 * balancing, rather than CPU_NEWLY_IDLE, because the latter
+	 * can fire way more frequently than the former.
+	 */
+	if (!sched_feat(SIS_UTIL) || env->idle == CPU_NEWLY_IDLE)
+		return;
+
+	nr_scan_limit = per_cpu(sd_llc_size, env->dst_cpu);
+	if (env->sd->span_weight != nr_scan_limit)
+		return;
+
+	sd_share = rcu_dereference_all(per_cpu(sd_llc_shared, env->dst_cpu));
+	if (!sd_share)
+		return;
+
+	nr_idle_scan = __update_idle_cpu_scan(env->sd, sum_util, nr_scan_limit);
+	if (nr_idle_scan != sd_share->nr_idle_scan)
+		WRITE_ONCE(sd_share->nr_idle_scan, nr_idle_scan);
 }
 
 /**
