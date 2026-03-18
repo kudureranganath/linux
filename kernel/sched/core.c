@@ -3663,15 +3663,13 @@ static inline struct task_struct *proxy_resched_idle(struct rq *rq);
  */
 static inline bool proxy_needs_return(struct rq *rq, struct task_struct *p)
 {
-	if (!sched_proxy_exec())
+	/* Task is not blocked. */
+	if (!task_is_blocked(p))
 		return false;
 
 	guard(raw_spinlock)(&p->blocked_lock);
 
-	/* If task isn't blocked_on, we don't need to do return migration */
-	if (!p->blocked_on)
-		return false;
-
+	/* Task is waking up; clear any blocked_on relationship. */
 	__clear_task_blocked_on(p, NULL);
 
 	/* If already current, don't need to return migrate */
@@ -3679,10 +3677,8 @@ static inline bool proxy_needs_return(struct rq *rq, struct task_struct *p)
 		return false;
 
 	/* If wake_cpu is targeting this cpu, don't bother return migrating */
-	if (p->wake_cpu == cpu_of(rq)) {
-		resched_curr(rq);
+	if (p->wake_cpu == cpu_of(rq))
 		return false;
-	}
 
 	/* If we're return migrating the rq->donor, switch it out for idle */
 	if (task_current_donor(rq, p))
@@ -4195,14 +4191,6 @@ int try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	 */
 	scoped_guard (raw_spinlock_irqsave, &p->pi_lock) {
 		smp_mb__after_spinlock();
-
-		/*
-		 * We could get a wakeup from a signal which wouldn't
-		 * mark the blocked_on state as PROXY_WAKING. So
-		 * set the woken task as PROXY_WAKING here so we are
-		 * sure the task will wake and run.
-		 */
-		set_task_blocked_on_waking(p, NULL);
 
 		if (!ttwu_state_match(p, state, &success)) {
 			/*
