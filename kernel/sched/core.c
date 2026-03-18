@@ -6883,6 +6883,32 @@ static void __sched notrace __schedule(int sched_mode)
 		switch_count = &prev->nvcsw;
 	}
 
+	/*
+	 * schedule() has raced with a wakeup and a task that was
+	 * supposed to be retained as a proxy has truly woken up.
+	 *
+	 * Clear the "prev->blocked_on" relation since it has been put
+	 * to TASK_RUNNING.
+	 *
+	 * We could rely on find_proxy_task() to handle this, but if
+	 * "prev" is preempted and picked later, find_proxy_task() could
+	 * see a TASK_RUNNING + PROXY_WAKING forcing a NEEDS_RETURN but
+	 * wake_up_process() fails to wake the task since
+	 * ttwu_state_match() fails for TASK_RUNNING leaving the task in
+	 * limbo.
+	 *
+	 * Interruptible sleep can cause wakeup for signal delivery
+	 * without transitioning the the blocked_on to PROXY_WAKING
+	 * hence, we must clear the blocked_on relation unconditionally,
+	 * and not just for PROXY_WAKING.
+	 *
+	 * "prev_state" would have been updated to TASK_RUNNING by
+	 * try_to_block_task() if "prev" wasn't blocked as a result of
+	 * pending signals.
+	 */
+	if (unlikely(!prev_state && task_is_blocked(prev)))
+		clear_task_blocked_on(prev, NULL);
+
 pick_again:
 	assert_balance_callbacks_empty(rq);
 	next = pick_next_task(rq, rq->donor, &rf);
