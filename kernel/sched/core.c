@@ -6770,63 +6770,16 @@ static void proxy_force_return(struct rq *rq, struct rq_flags *rf,
 			       struct task_struct *p)
 	__must_hold(__rq_lockp(rq))
 {
-	struct rq *task_rq, *target_rq = NULL;
-	int cpu, wake_flag = WF_TTWU;
-
 	lockdep_assert_rq_held(rq);
 	WARN_ON(p == rq->curr);
 
 	if (p == rq->donor)
 		proxy_resched_idle(rq);
 
+	block_task(rq, p, DEQUEUE_NOCLOCK | DEQUEUE_SPECIAL);
 	proxy_release_rq_lock(rq, rf);
-	/*
-	 * We drop the rq lock, and re-grab task_rq_lock to get
-	 * the pi_lock (needed for select_task_rq) as well.
-	 */
-	scoped_guard (task_rq_lock, p) {
-		task_rq = scope.rq;
 
-		/*
-		 * Since we let go of the rq lock, the task may have been
-		 * woken or migrated to another rq before we  got the
-		 * task_rq_lock. So re-check we're on the same RQ. If
-		 * not, the task has already been migrated and that CPU
-		 * will handle any futher migrations.
-		 */
-		if (task_rq != rq)
-			break;
-
-		/*
-		 * Similarly, if we've been dequeued, someone else will
-		 * wake us
-		 */
-		if (!task_on_rq_queued(p))
-			break;
-
-		/*
-		 * Since we should only be calling here from __schedule()
-		 * -> find_proxy_task(), no one else should have
-		 * assigned current out from under us. But check and warn
-		 * if we see this, then bail.
-		 */
-		if (task_current(task_rq, p) || task_on_cpu(task_rq, p)) {
-			WARN_ONCE(1, "%s rq: %i current/on_cpu task %s %d  on_cpu: %i\n",
-				  __func__, cpu_of(task_rq),
-				  p->comm, p->pid, p->on_cpu);
-			break;
-		}
-
-		update_rq_clock(task_rq);
-		deactivate_task(task_rq, p, DEQUEUE_NOCLOCK);
-		cpu = select_task_rq(p, p->wake_cpu, &wake_flag);
-		set_task_cpu(p, cpu);
-		target_rq = cpu_rq(cpu);
-		clear_task_blocked_on(p, NULL);
-	}
-
-	if (target_rq)
-		attach_one_task(target_rq, p);
+	wake_up_process(p);
 
 	proxy_reacquire_rq_lock(rq, rf);
 }
