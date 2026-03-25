@@ -3676,10 +3676,6 @@ static inline bool proxy_needs_return(struct rq *rq, struct task_struct *p)
 	if (task_current(rq, p))
 		return false;
 
-	/* If wake_cpu is targeting this cpu, don't bother return migrating */
-	if (p->wake_cpu == cpu_of(rq))
-		return false;
-
 	/* If we're return migrating the rq->donor, switch it out for idle */
 	if (task_current_donor(rq, p))
 		proxy_resched_idle(rq);
