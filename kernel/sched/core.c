@@ -6617,8 +6617,6 @@ static bool try_to_block_task(struct rq *rq, struct task_struct *p,
 	if (signal_pending_state(task_state, p)) {
 		WRITE_ONCE(p->__state, TASK_RUNNING);
 		*task_state_p = TASK_RUNNING;
-		set_task_blocked_on_waking(p, NULL);
-
 		return false;
 	}
 
