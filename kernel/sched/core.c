@@ -3659,7 +3659,17 @@ static inline void proxy_set_task_cpu(struct task_struct *p, int cpu)
 	p->wake_cpu = wake_cpu;
 }
 
-static inline struct task_struct *proxy_resched_idle(struct rq *rq);
+static void zap_balance_callbacks(struct rq *rq);
+
+static inline void proxy_reset_donor(struct rq *rq)
+{
+	WARN_ON_ONCE(rq->donor == rq->curr);
+
+	put_prev_set_next_task(rq, rq->donor, rq->curr);
+	rq_set_donor(rq, rq->curr);
+	zap_balance_callbacks(rq);
+	resched_curr(rq);
+}
 
 /*
  * Checks to see if task p has been proxy-migrated to another rq
@@ -3685,7 +3695,7 @@ static inline bool proxy_needs_return(struct rq *rq, struct task_struct *p)
 
 	/* If we're return migrating the rq->donor, switch it out for idle */
 	if (task_current_donor(rq, p))
-		proxy_resched_idle(rq);
+		proxy_reset_donor(rq);
 
 	/* (ab)Use DEQUEUE_SPECIAL to ensure task is always blocked here. */
 	block_task(rq, p, DEQUEUE_NOCLOCK | DEQUEUE_SPECIAL);
