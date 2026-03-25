@@ -6666,9 +6666,20 @@ static bool proxy_deactivate(struct rq *rq, struct task_struct *donor)
 {
 	unsigned long state = READ_ONCE(donor->__state);
 
-	/* Don't deactivate if the state has been changed to TASK_RUNNING */
-	if (state == TASK_RUNNING)
-		return false;
+	/*
+	 * Don't deactivate if the state has been changed to TASK_RUNNING
+	 * Cleared the "blocked_on" relation and just retry the pick.
+	 *
+	 * XXX: This should never happen. Blocked donors should never be
+	 * forced into TASK_RUNNING without a wakeup that clears the
+	 * "blocked_on" relation. Since the task is runnable here, assume
+	 * there was no need for return migrate.
+	 */
+	if (WARN_ON_ONCE(state == TASK_RUNNING)) {
+		clear_task_blocked_on(donor, NULL);
+		return true;
+	}
+
 	/*
 	 * Because we got donor from pick_next_task(), it is *crucial*
 	 * that we call proxy_resched_idle() before we deactivate it.
@@ -6679,6 +6690,28 @@ static bool proxy_deactivate(struct rq *rq, struct task_struct *donor)
 	 * need to be changed from next *before* we deactivate.
 	 */
 	proxy_resched_idle(rq);
+
+	/*
+	 * This needs to be done before try_to_block_task() since the
+	 * "donor->__state" needs to be preserved. Setting donor to
+	 * TASK_RUNNING will fail the ttwu_state_match() on the
+	 * NEEDS_RETURN path.
+	 *
+	 * Clear the blocked_on relation before doing a full
+	 * block + wakeup cycle.
+	 */
+	if (signal_pending_state(state, donor))
+		return false;
+
+	/*
+	 * Preserve the "blocked_on" relation when blocking which allows
+	 * the task to be delayed. ttwu_runnable() would figure if a
+	 * proxy_needs_return() is needed by looking at "blocked_on".
+	 *
+	 * If the "blocked_on" is not preserved, ttwu_runnable() can
+	 * simply requeue the delayed task without considering the need
+	 * to return migrate which can potentially violate affinity.
+	 */
 	return try_to_block_task(rq, donor, &state, true);
 }
 
@@ -6852,6 +6885,7 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 		if (mutex == PROXY_WAKING) {
 			if (task_current(rq, p)) {
 				clear_task_blocked_on(p, PROXY_WAKING);
+				WRITE_ONCE(p->__state, TASK_RUNNING);
 				return p;
 			}
 			action = NEEDS_RETURN;
@@ -6888,6 +6922,7 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 			 */
 			if (task_current(rq, p)) {
 				__clear_task_blocked_on(p, NULL);
+				WRITE_ONCE(p->__state, TASK_RUNNING);
 				return p;
 			}
 			action = NEEDS_RETURN;

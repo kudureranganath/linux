@@ -2970,6 +2970,19 @@ static inline void __block_task(struct rq *rq, struct task_struct *p)
 		delayacct_blkio_start();
 	}
 
+	/*
+	 * "blocked_on" relation has no value when the task has been
+	 * fully blocked since a subsequent wakeup implies task is no
+	 * longer blocked on a resource and needs to run on CPU before
+	 * it can re-evalute the state.
+	 *
+	 * Unconditionally clear the "blocked_on" relation once the task
+	 * is fully taken off the rq. For delayed task, the "blocked_on"
+	 * relation is still useful to force proxy_needs_return().
+	 */
+	if (task_is_blocked(p))
+		clear_task_blocked_on(p, NULL);
+
 	ASSERT_EXCLUSIVE_WRITER(p->on_rq);
 
 	/*
