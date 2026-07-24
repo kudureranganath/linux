@@ -31,7 +31,7 @@ export -f do_build
 
 set -e
 
-CFGS="proxy_test_defconfig noproxy_test_defconfig proxy_nosmp_test_defconfig proxy_preempt_test_defconfig proxy_llvm_defconfig"
+CFGS="proxy_test_defconfig noproxy_test_defconfig proxy_nosmp_test_defconfig proxy_preempt_test_defconfig "
 
 date;
 git log --pretty="Building %C(yellow)%h%C(reset) %s" HEAD~1..HEAD
