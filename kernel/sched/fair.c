@@ -6265,7 +6265,7 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 
 	action = UPDATE_TG;
 	if (entity_is_task(se)) {
-		if (task_on_rq_migrating(task_of(se)))
+		if (flags & DEQUEUE_MIGRATING)
 			action |= DO_DETACH;
 
 		if (sleep && !(flags & DEQUEUE_DELAYED))
@@ -6663,7 +6663,7 @@ static void dequeue_throttled_task(struct task_struct *p, int flags)
 	 * task is migrating off its old cfs_rq, detach
 	 * the task's load from its old cfs_rq.
 	 */
-	if (task_on_rq_migrating(p))
+	if (flags & DEQUEUE_MIGRATING)
 		detach_task_cfs_rq(p);
 }
 
@@ -7981,7 +7981,7 @@ static int dequeue_entities(struct rq *rq, struct sched_entity *se, int flags)
 			break;
 		}
 		flags |= DEQUEUE_SLEEP;
-		flags &= ~(DEQUEUE_DELAYED | DEQUEUE_SPECIAL);
+		flags &= ~(DEQUEUE_DELAYED | DEQUEUE_SPECIAL | DEQUEUE_MIGRATING);
 	}
 
 	for_each_sched_entity(se) {

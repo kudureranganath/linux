@@ -2530,9 +2530,6 @@ static void enqueue_task_dl(struct rq *rq, struct task_struct *p, int flags)
 	check_schedstat_required();
 	update_stats_wait_start_dl(dl_rq, dl_se);
 
-	if (task_on_rq_migrating(p))
-		flags |= ENQUEUE_MIGRATING;
-
 	enqueue_dl_entity(dl_se, flags);
 
 	if (dl_server(dl_se))
@@ -2551,9 +2548,6 @@ static void enqueue_task_dl(struct rq *rq, struct task_struct *p, int flags)
 static bool dequeue_task_dl(struct rq *rq, struct task_struct *p, int flags)
 {
 	update_curr_dl(rq);
-
-	if (task_on_rq_migrating(p))
-		flags |= DEQUEUE_MIGRATING;
 
 	dequeue_dl_entity(&p->dl, flags);
 	if (!p->dl.dl_throttled && !dl_server(&p->dl))

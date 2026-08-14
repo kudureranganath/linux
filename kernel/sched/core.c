@@ -2218,9 +2218,6 @@ inline bool dequeue_task(struct rq *rq, struct task_struct *p, int flags)
 
 static void __activate_task(struct rq *rq, struct task_struct *p, int flags)
 {
-	if (task_on_rq_migrating(p))
-		flags |= ENQUEUE_MIGRATED;
-
 	enqueue_task(rq, p, flags);
 
 	WRITE_ONCE(p->on_rq, TASK_ON_RQ_QUEUED);
@@ -2229,7 +2226,7 @@ static void __activate_task(struct rq *rq, struct task_struct *p, int flags)
 
 void activate_task(struct rq *rq, struct task_struct *p, int en_flags)
 {
-	__activate_task(rq, p, en_flags);
+	__activate_task(rq, p, en_flags | ENQUEUE_MIGRATING);
 }
 
 static void activate_blocked_task(struct rq *rq, struct task_struct *p, int en_flags)
@@ -2249,7 +2246,7 @@ void deactivate_task(struct rq *rq, struct task_struct *p, int flags)
 	 * dequeue_task() and cleared *after* enqueue_task().
 	 */
 
-	dequeue_task(rq, p, flags);
+	dequeue_task(rq, p, flags | DEQUEUE_MIGRATING);
 }
 
 static void block_task(struct rq *rq, struct task_struct *p, unsigned long task_state)
