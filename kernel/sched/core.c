@@ -6958,8 +6958,8 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 			goto activate;
 		}
 
-		if (!READ_ONCE(owner->on_rq) || owner->se.sched_delayed) {
-			/* XXX Don't handle blocked owners/delayed dequeue yet */
+		if (!READ_ONCE(owner->on_rq)) {
+			/* XXX Don't handle blocked owners yet */
 			if (curr_in_chain)
 				return proxy_resched_idle(rq);
 			__clear_task_blocked_on(p, NULL);
@@ -7025,6 +7025,18 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 			 */
 			return proxy_resched_idle(rq);
 		}
+
+		/*
+		 * Delayed owner is on the same CPU and rq_lock is held. Treat this
+		 * like pick resolving to the delayed owner and block the task
+		 * completely before retrying the pick.
+		 *
+		 * This prevents the need to resolve "owner->blocked_head" chain for
+		 * wakeup of delayed task and fast-path them.
+		 */
+		if (owner->se.sched_delayed)
+			goto block_delayed_owner;
+
 		/*
 		 * OK, now we're absolutely sure @owner is on this
 		 * rq, therefore holding @rq->lock is sufficient to
@@ -7051,6 +7063,9 @@ deactivate:
 	return NULL;
 migrate_task:
 	proxy_migrate_task(rq, rf, p, owner_cpu);
+	return NULL;
+block_delayed_owner:
+	dequeue_task(rq, owner, DEQUEUE_SLEEP | DEQUEUE_DELAYED);
 	return NULL;
 }
 #else /* SCHED_PROXY_EXEC */
