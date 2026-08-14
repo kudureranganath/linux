@@ -84,7 +84,8 @@ unsigned long mutex_get_owner(struct mutex *lock)
  */
 static inline struct task_struct *__mutex_trylock_common(struct mutex *lock, bool handoff)
 {
-	unsigned long owner, curr = (unsigned long)current;
+	struct task_struct *cur_task = current;
+	unsigned long owner, curr = (unsigned long)cur_task;
 
 	owner = atomic_long_read(&lock->owner);
 	for (;;) { /* must loop, can race against a flag */
@@ -109,8 +110,10 @@ static inline struct task_struct *__mutex_trylock_common(struct mutex *lock, boo
 		}
 
 		if (atomic_long_try_cmpxchg_acquire(&lock->owner, &owner, task | flags)) {
-			if (task == curr)
+			if (task == curr) {
+				cur_task->lock_nesting++;
 				return NULL;
+			}
 			break;
 		}
 	}
@@ -153,13 +156,16 @@ EXPORT_SYMBOL(mutex_init_generic);
 static __always_inline bool __mutex_trylock_fast(struct mutex *lock)
 	__cond_acquires(true, lock)
 {
-	unsigned long curr = (unsigned long)current;
+	struct task_struct *cur_task = current;
+	unsigned long curr = (unsigned long)cur_task;
 	unsigned long zero = 0UL;
 
 	MUTEX_WARN_ON(lock->magic != lock);
 
-	if (atomic_long_try_cmpxchg_acquire(&lock->owner, &zero, curr))
+	if (atomic_long_try_cmpxchg_acquire(&lock->owner, &zero, curr)) {
+		cur_task->lock_nesting++;
 		return true;
+	}
 
 	return false;
 }
@@ -167,9 +173,15 @@ static __always_inline bool __mutex_trylock_fast(struct mutex *lock)
 static __always_inline bool __mutex_unlock_fast(struct mutex *lock)
 	__cond_releases(true, lock)
 {
-	unsigned long curr = (unsigned long)current;
+	struct task_struct *cur_task = current;
+	unsigned long curr = (unsigned long)cur_task;
 
-	return atomic_long_try_cmpxchg_release(&lock->owner, &curr, 0UL);
+	if (atomic_long_try_cmpxchg_release(&lock->owner, &curr, 0UL)) {
+		cur_task->lock_nesting--;
+		return true;
+	}
+
+	return false;
 }
 
 #else /* !CONFIG_DEBUG_LOCK_ALLOC */
@@ -723,7 +735,22 @@ __mutex_lock_common(struct mutex *lock, unsigned int state, unsigned int subclas
 
 		raw_spin_unlock_irqrestore_wake(&lock->wait_lock, flags, &wake_q);
 
+		/*
+		 * Mutex handoff can set the current as the lock owner while
+		 * it is blocked. Increment "nesting_count" on the way to
+		 * schedule() to notify the wakeup path that __mutex_owner()
+		 * can resolve to this task on the way back.
+		 */
+		current->lock_nesting++;
+
 		schedule_preempt_disabled();
+
+		/*
+		 * Fix the guard against handoff. If the task got the lock,
+		 * __mutex_trylock*() will increment the lock_nesting when the
+		 * acquisition is finalized before exiting.
+		 */
+		current->lock_nesting--;
 
 		first = lock->first_waiter == &waiter;
 
@@ -981,7 +1008,7 @@ EXPORT_SYMBOL_GPL(ww_mutex_lock_interruptible);
 static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigned long ip)
 	__releases(lock)
 {
-	struct task_struct *donor, *next = NULL;
+	struct task_struct *cur_task, *donor, *next = NULL;
 	struct mutex_waiter *waiter;
 	unsigned long owner;
 	unsigned long flags;
@@ -997,6 +1024,10 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
 	 * missed.
 	 */
 	guard(preempt)();
+
+	cur_task = current;
+	cur_task->lock_nesting--;
+
 	/*
 	 * Release the lock before (potentially) taking the spinlock such that
 	 * other contenders can get on with things ASAP.
@@ -1006,10 +1037,10 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
 	 */
 	owner = atomic_long_read(&lock->owner);
 	for (;;) {
-		MUTEX_WARN_ON(__owner_task(owner) != current);
+		MUTEX_WARN_ON(__owner_task(owner) != cur_task);
 		MUTEX_WARN_ON(owner & MUTEX_FLAG_PICKUP);
 
-		if (sched_proxy_exec() && current->blocked_donor) {
+		if (sched_proxy_exec() && cur_task->blocked_donor) {
 			/* force handoff if we have a blocked_donor */
 			owner = MUTEX_FLAG_HANDOFF;
 			break;
@@ -1027,7 +1058,7 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
 	}
 
 	raw_spin_lock_irqsave(&lock->wait_lock, flags);
-	raw_spin_lock(&current->blocked_lock);
+	raw_spin_lock(&cur_task->blocked_lock);
 	debug_mutex_unlock(lock);
 
 	if (sched_proxy_exec()) {
@@ -1036,7 +1067,7 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
 		 * current through this lock, hand the lock to that task, as that
 		 * is the highest waiter, as selected by the scheduling function.
 		 */
-		donor = current->blocked_donor;
+		donor = cur_task->blocked_donor;
 		if (donor) {
 			struct mutex *next_lock;
 
@@ -1045,7 +1076,7 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
 			if (next_lock == lock) {
 				next = get_task_struct(donor);
 				__clear_task_blocked_on(next, lock);
-				current->blocked_donor = NULL;
+				cur_task->blocked_donor = NULL;
 			}
 			raw_spin_unlock(&donor->blocked_lock);
 		}
@@ -1071,7 +1102,7 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
 	if (owner & MUTEX_FLAG_HANDOFF)
 		__mutex_handoff(lock, next);
 
-	raw_spin_unlock(&current->blocked_lock);
+	raw_spin_unlock(&cur_task->blocked_lock);
 	raw_spin_unlock_irqrestore(&lock->wait_lock, flags);
 	if (next) {
 		wake_up_process(next);

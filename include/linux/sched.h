@@ -1272,6 +1272,12 @@ struct task_struct {
 	struct task_struct		*sleeping_owner; /* task our blocked_node is enqueued on */
 	int				blocked_cpu;	 /* CPU where task was blocked. */
 #endif
+	/*
+	 * HACK: These bits should technically live in CONFIG_SCHED_PROXY_EXEC
+	 * block and only account when sched_proxy_exec() is true but for the
+	 * PoC keep it outside and assume proxy is always enabled ;-)
+	 */
+	unsigned int			lock_nesting;
 
 	/*
 	 * The task that is boosting this task; a back link for the current
