@@ -2508,7 +2508,7 @@ proxy_activate_blocked_task(struct rq *rq, struct task_struct *p, int en_flags)
 
 static void activate_blocked_task(struct rq *rq, struct task_struct *p, int en_flags)
 {
-	if (!sched_proxy_exec()) {
+	if (likely(!sched_proxy_exec() || !p->lock_nesting)) {
 		__activate_task(rq, p, en_flags);
 		return;
 	}
@@ -4065,7 +4065,7 @@ static inline void proxy_reset_donor(struct rq *rq)
 
 void __proxy_block_task(struct task_struct *p)
 {
-	if (!sched_proxy_exec())
+	if (!sched_proxy_exec() || likely(!p->lock_nesting))
 		return;
 
 	if (unlikely(p->is_linked && p->blocked_cpu != task_cpu(p))) {
