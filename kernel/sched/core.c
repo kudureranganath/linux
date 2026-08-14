@@ -2216,7 +2216,7 @@ inline bool dequeue_task(struct rq *rq, struct task_struct *p, int flags)
 	return p->sched_class->dequeue_task(rq, p, flags);
 }
 
-void activate_task(struct rq *rq, struct task_struct *p, int flags)
+static void __activate_task(struct rq *rq, struct task_struct *p, int flags)
 {
 	if (task_on_rq_migrating(p))
 		flags |= ENQUEUE_MIGRATED;
@@ -2225,6 +2225,16 @@ void activate_task(struct rq *rq, struct task_struct *p, int flags)
 
 	WRITE_ONCE(p->on_rq, TASK_ON_RQ_QUEUED);
 	ASSERT_EXCLUSIVE_WRITER(p->on_rq);
+}
+
+void activate_task(struct rq *rq, struct task_struct *p, int en_flags)
+{
+	__activate_task(rq, p, en_flags);
+}
+
+static void activate_blocked_task(struct rq *rq, struct task_struct *p, int en_flags)
+{
+	__activate_task(rq, p, en_flags);
 }
 
 void deactivate_task(struct rq *rq, struct task_struct *p, int flags)
@@ -3822,7 +3832,7 @@ ttwu_do_activate(struct rq *rq, struct task_struct *p, int wake_flags,
 		atomic_dec(&task_rq(p)->nr_iowait);
 	}
 
-	activate_task(rq, p, en_flags);
+	activate_blocked_task(rq, p, en_flags);
 	wakeup_preempt(rq, p, wake_flags);
 
 	ttwu_do_wakeup(p);
@@ -4961,7 +4971,7 @@ void wake_up_new_task(struct task_struct *p)
 	update_rq_clock(rq);
 	post_init_entity_util_avg(p);
 
-	activate_task(rq, p, ENQUEUE_NOCLOCK | ENQUEUE_INITIAL);
+	activate_blocked_task(rq, p, ENQUEUE_NOCLOCK | ENQUEUE_INITIAL);
 	trace_sched_wakeup_new(p);
 	wakeup_preempt(rq, p, wake_flags);
 	if (p->sched_class->task_woken) {
