@@ -2229,6 +2229,16 @@ void activate_task(struct rq *rq, struct task_struct *p, int en_flags)
 	__activate_task(rq, p, en_flags | ENQUEUE_MIGRATING);
 }
 
+#ifdef CONFIG_SCHED_PROXY_EXEC
+
+static void __proxy_dequeue_from_owner(struct task_struct *p)
+{
+	list_del_init(&p->blocked_node);
+	WRITE_ONCE(p->sleeping_owner, NULL);
+}
+
+#endif /* CONFIG_SCHED_PROXY_EXEC */
+
 static void activate_blocked_task(struct rq *rq, struct task_struct *p, int en_flags)
 {
 	__activate_task(rq, p, en_flags);
@@ -6872,6 +6882,43 @@ static void proxy_migrate_task(struct rq *rq, struct rq_flags *rf,
 	proxy_reacquire_rq_lock(rq, rf);
 }
 
+static void proxy_enqueue_on_owner(struct rq *rq, struct task_struct *owner,
+				   struct task_struct *p)
+{
+	lockdep_assert_rq_held(rq);
+	lockdep_assert_held(&owner->blocked_lock);
+
+	WARN_ON(!p->on_rq);
+	WARN_ON(p->sleeping_owner);
+
+	WRITE_ONCE(p->sleeping_owner, owner);
+	list_add(&p->blocked_node, &owner->blocked_head);
+	proxy_resched_idle(rq);
+
+	/*
+	 * Order against __activate_blocked_task_slowpath() checking
+	 * owner->blocked_list after setting owner->on_rq.
+	 */
+	smp_mb();
+
+	if (READ_ONCE(owner->on_rq)) {
+		/*
+		 * owner has woken up and may miss activating us.
+		 * Remove ourself from "owner->blocked_head" and try
+		 * find_proxy_task() again considering the owner's
+		 * new state.
+		 */
+		__proxy_dequeue_from_owner(p);
+		return;
+	}
+
+	/*
+	 * Owner is fully blocked. __activate_blocked_task_slowpath()
+	 * will see us on the list during wakeup and DTRT.
+	 */
+	block_task(rq, p, READ_ONCE(p->__state));
+}
+
 /*
  * Find runnable lock owner to proxy for mutex blocked donor
  *
@@ -6962,8 +7009,25 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 			/* XXX Don't handle blocked owners yet */
 			if (curr_in_chain)
 				return proxy_resched_idle(rq);
-			__clear_task_blocked_on(p, NULL);
-			goto deactivate;
+			/*
+			 * If !@owner->on_rq, holding @rq->lock will not pin the task,
+			 * so we cannot drop @mutex->wait_lock until we're sure its a blocked
+			 * task on this rq.
+			 *
+			 * We use @owner->blocked_lock to serialize against ttwu_activate().
+			 * Either we see its new owner->on_rq or it will see our list_add().
+			 */
+			WARN_ON(owner == p);
+
+			raw_spin_unlock(&p->blocked_lock);
+			raw_spin_lock(&owner->blocked_lock);
+
+			proxy_enqueue_on_owner(rq, owner, p);
+
+			raw_spin_unlock(&owner->blocked_lock);
+			raw_spin_lock(&p->blocked_lock);
+
+			return NULL; /* retry task selection */
 		}
 
 		owner_cpu = task_cpu(owner);

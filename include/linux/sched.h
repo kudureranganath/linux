@@ -1251,6 +1251,11 @@ struct task_struct {
 
 	struct mutex			*blocked_on;	/* lock we're blocked on */
 	raw_spinlock_t			blocked_lock;
+#ifdef CONFIG_SCHED_PROXY_EXEC
+	struct list_head		blocked_head;  /* tasks blocked on this task */
+	struct list_head		blocked_node;  /* our entry on someone elses blocked_head */
+	struct task_struct		*sleeping_owner; /* task our blocked_node is enqueued on */
+#endif
 
 	/*
 	 * The task that is boosting this task; a back link for the current
