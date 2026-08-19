@@ -1255,6 +1255,7 @@ struct task_struct {
 	struct list_head		blocked_head;  /* tasks blocked on this task */
 	struct list_head		blocked_node;  /* our entry on someone elses blocked_head */
 	struct task_struct		*sleeping_owner; /* task our blocked_node is enqueued on */
+	int				blocked_cpu;	 /* CPU where task was blocked. */
 #endif
 
 	/*

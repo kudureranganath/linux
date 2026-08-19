@@ -3773,6 +3773,22 @@ static inline void proxy_reset_donor(struct rq *rq)
 	resched_curr(rq);
 }
 
+void __proxy_block_task(struct task_struct *p)
+{
+	if (!sched_proxy_exec())
+		return;
+
+	/*
+	 * This is the CPU where the __active_blocked_donor() slowpath will
+	 * resume activation of blocked donors queued on this task.
+	 *
+	 * This exists to cover the race between set_task_cpu() changing the
+	 * task_cpu() before task is transitioned to TASK_ON_RQ_QUEUED in
+	 * activate_blocked_task().
+	 */
+	WRITE_ONCE(p->blocked_cpu, task_cpu(p));
+}
+
 /*
  * Checks to see if task p has been proxy-migrated to another rq
  * and needs to be returned. If so, we deactivate the task here

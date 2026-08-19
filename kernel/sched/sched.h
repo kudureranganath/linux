@@ -1445,11 +1445,15 @@ static inline void rq_set_donor(struct rq *rq, struct task_struct *t)
 {
 	rcu_assign_pointer(rq->donor, t);
 }
+
+void __proxy_block_task(struct task_struct *p);
 #else
 static inline void rq_set_donor(struct rq *rq, struct task_struct *t)
 {
 	/* Do nothing */
 }
+
+static inline void __proxy_block_task(struct task_struct *p) {}
 #endif
 
 #ifdef CONFIG_SCHED_CORE
@@ -3038,6 +3042,8 @@ static inline void __block_task(struct rq *rq, struct task_struct *p)
 		atomic_inc(&rq->nr_iowait);
 		delayacct_blkio_start();
 	}
+
+	__proxy_block_task(p);
 
 	ASSERT_EXCLUSIVE_WRITER(p->on_rq);
 
