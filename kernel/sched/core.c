@@ -6916,7 +6916,7 @@ static void proxy_enqueue_on_owner(struct rq *rq, struct task_struct *owner,
 	 * Owner is fully blocked. __activate_blocked_task_slowpath()
 	 * will see us on the list during wakeup and DTRT.
 	 */
-	block_task(rq, p, READ_ONCE(p->__state));
+	block_task(rq, p, READ_ONCE(p->__state) | TASK_WAKING);
 }
 
 /*
