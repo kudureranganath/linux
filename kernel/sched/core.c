@@ -630,6 +630,18 @@ int task_llc(const struct task_struct *p)
  *   if the task is blocked. Traditionally this would mirror p->on_rq, however
  *   due things like DELAY_DEQUEUE and PROXY_EXEC, this can diverge.
  *
+ * p->is_linked <- { 0, 1 }:
+ *
+ *   is set by proxy_enqueue_on_onwer() and cleared by either
+ *   proxy_needs_return() or proxy_dequeue_from_owner() and tracks if task is
+ *   queued on a sleeping owner's blocked_head. Although this could have been
+ *   a p->on_rq state, it really represents the state of task when it is off
+ *   the rq and is tracked separately for convenience.
+ *
+ *   is_linked is always modified under __task_rq_lock() or when
+ *   task_on_rq_migrating() during chain-wakeup where concurrent
+ *   __task_rq_lock() is stalled for the task.
+ *
  * task_cpu(p): is changed by set_task_cpu(), the rules are:
  *
  *  - Don't call set_task_cpu() on a blocked task:
@@ -2235,6 +2247,7 @@ static void __proxy_dequeue_from_owner(struct task_struct *p)
 {
 	list_del_init(&p->blocked_node);
 	WRITE_ONCE(p->sleeping_owner, NULL);
+	WRITE_ONCE(p->is_linked, 0);
 }
 
 #endif /* CONFIG_SCHED_PROXY_EXEC */
@@ -4307,6 +4320,7 @@ int try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 		 */
 		WARN_ON_ONCE(p->se.sched_delayed);
 		WARN_ON_ONCE(p->is_blocked);
+		WARN_ON_ONCE(p->is_linked);
 		/* If p is current, we know we can run here, so clear blocked_on */
 		clear_task_blocked_on(p, NULL);
 		if (!ttwu_state_match(p, state, &success))
@@ -4611,6 +4625,7 @@ static void __sched_fork(u64 clone_flags, struct task_struct *p)
 	/* A delayed task cannot be in clone(). */
 	WARN_ON_ONCE(p->se.sched_delayed);
 	WARN_ON_ONCE(p->is_blocked);
+	WARN_ON_ONCE(p->is_linked);
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	p->se.cfs_rq			= NULL;
@@ -6909,6 +6924,7 @@ static void proxy_enqueue_on_owner(struct rq *rq, struct task_struct *owner,
 
 	WRITE_ONCE(p->sleeping_owner, owner);
 	list_add(&p->blocked_node, &owner->blocked_head);
+	WRITE_ONCE(p->is_linked, 1);
 	proxy_resched_idle(rq);
 
 	/*

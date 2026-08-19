@@ -854,8 +854,8 @@ struct task_struct {
 
 	u8				on_cpu;
 	u8				on_rq;
+	u8				is_linked;
 	u8				is_blocked;
-	u8				__pad;
 
 	struct __call_single_node	wake_entry;
 	unsigned int			wakee_flips;
