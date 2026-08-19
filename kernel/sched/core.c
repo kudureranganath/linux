@@ -2252,6 +2252,96 @@ static void __proxy_dequeue_from_owner(struct task_struct *p)
 	list_del_init(&p->blocked_node);
 	WRITE_ONCE(p->sleeping_owner, NULL);
 	WRITE_ONCE(p->is_linked, 0);
+	/*
+	 * p->blocked_cpu is intentionally left un-altered
+	 * since the wakeup path requires it to grab the
+	 * correct rq for chain wakeup if we are here from
+	 * the activation path.
+	 *
+	 * "p->blocked_cpu" only has significance for blocked
+	 * task on "blocked_head" and a stale value in the
+	 * field is harmless.
+	 */
+}
+
+static void proxy_dequeue_from_owner(struct task_struct *p)
+{
+	struct task_struct *owner = p->sleeping_owner;
+
+	scoped_guard(raw_spinlock, &owner->blocked_lock) {
+		WARN_ON_ONCE(p->sleeping_owner != owner);
+		__proxy_dequeue_from_owner(p);
+	}
+}
+
+static bool proxy_try_dequeue_from_owner(struct task_struct *p)
+{
+	struct task_struct *owner = READ_ONCE(p->sleeping_owner);
+
+	/*
+	 * Task is outside __task_rq_lock(). These fields
+	 * can race with a chain-wakeup.
+	 */
+	if (!owner || READ_ONCE(p->on_rq))
+		return false;
+
+	/*
+	 * The chain-wakeup slowpath grabs both the rq_lock() and the
+	 * owner->blocked_lock while removing the tasks on
+	 * owner->blocked_head.
+	 *
+	 * If there is no concurrent chain-wakeup for this task, it is
+	 * safe to just hold the owner->blocked_lock which serializes
+	 * the removal like:
+	 *
+	 * proxy_try_dequeue_from_owner(donor)	proxy_activate_blocked_donor(owner)
+	 *					  LOCK rq_lock(p->blocked_cpu)
+	 *   LOCK &owner->blocked_lock		  LOCK &owner->blocked_lock
+	 *
+	 *     # Defensive checks		    STORE donor->on_rq = MIGRATING
+	 *     __proxy_dequeue_from_owner()	    smp_mb()
+	 *
+	 *   UNLOCK &owner->blocked_lock	  UNLOCK &owner->blocked_lock
+	 *
+	 *   # If proxy_try_dequeue fails
+	 *   __task_rq_lock(donor)		  __proxy_dequeue_from_owner(donor)
+	 *     if (donor->on_rq == MIGRATING)	  __activate_task(donor)
+	 *       cpu_relax()			    STORE p->on_rq = 1
+	 *
+	 *   # Sees consistent state.
+	 *
+	 * Either proxy_activate_blocked_donor() manages to dequeue the donor
+	 * and stall the __task_rq_lock() until the task is actually stable
+	 * or proxy_try_dequeue_from_owner() wins and manages to remove the
+	 * task from "owner->blocked_head" first.
+	 */
+	scoped_guard(raw_spinlock, &owner->blocked_lock) {
+		/*
+		 * Chain-wakeup has raced to queue the task.
+		 * Try again with __task_rq_lock() held.
+		 */
+		if (READ_ONCE(p->on_rq))
+			return false;
+
+		/*
+		 * Something changes in the link. Try again with
+		 * __task_rq_lock() held via proxy_needs_return()
+		 * where both p->on_rq and p->is_linked is stable.
+		 */
+		if (!READ_ONCE(p->is_linked) || owner != READ_ONCE(p->sleeping_owner))
+			return false;
+
+		__proxy_dequeue_from_owner(p);
+	}
+
+	return true;
+}
+
+#else /* !CONFIG_SCHED_PROXY_EXEC */
+
+static bool proxy_try_dequeue_from_owner(struct task_struct *p)
+{
+	return false;
 }
 
 #endif /* CONFIG_SCHED_PROXY_EXEC */
@@ -3799,6 +3889,40 @@ void __proxy_block_task(struct task_struct *p)
 	if (!sched_proxy_exec())
 		return;
 
+	if (unlikely(p->is_linked && p->blocked_cpu != task_cpu(p))) {
+		WRITE_ONCE(p->on_rq, TASK_ON_RQ_MIGRATING);
+		ASSERT_EXCLUSIVE_WRITER(p->on_rq);
+
+		/* Move iowait signal to new CPU. */
+		if (p->in_iowait) {
+			atomic_dec(&task_rq(p)->nr_iowait);
+			atomic_inc(&cpu_rq(p->blocked_cpu)->nr_iowait);
+		}
+
+		/*
+		 * Moved the linked task to p->blocked_cpu which is now
+		 * resposnible for chain wakeup. TASK_ON_RQ_MIGRATING
+		 * above stalls task_rq_lock() until p->on_rq is
+		 * transitioned to 0 (See ___task_rq_lock()).
+		 */
+		proxy_set_task_cpu(p, p->blocked_cpu);
+
+		/*
+		 * Preserve p->blocked_cpu for any potential future
+		 * additions to p->blocked_head. The chain should be
+		 * re-directed to the same "blocked_cpu".
+		 *
+		 * XXX: Technically, it is possible to keep the
+		 * "blocked_cpu" for this sub-chain different
+		 * compared to our ancestors but the chain-wakeup
+		 * would need to juggle multiple locks then to
+		 * ensure it doesn't race with concurrent wakeups.
+		 * Matching "blocked_cpu" requires only a single
+		 * rq_lock which is simpler.
+		 */
+		return;
+	}
+
 	/*
 	 * This is the CPU where the __active_blocked_donor() slowpath will
 	 * resume activation of blocked donors queued on this task.
@@ -3819,6 +3943,25 @@ void __proxy_block_task(struct task_struct *p)
  */
 static inline bool proxy_needs_return(struct rq *rq, struct task_struct *p)
 {
+	if (!sched_proxy_exec())
+		return false;
+
+	/* See try_to_wake_up() for ordering guarantees. */
+	if (unlikely(p->is_linked)) {
+		/*
+		 * Task is queued on an owner's blocked_node.
+		 *
+		 * Dequeue from owner's blocked_node before going
+		 * further. Do not take the fast-path since this task is
+		 * fully blocked and it is necessary to clear
+		 * p->blocked_on indicator before waking up.
+		 */
+		WARN_ON_ONCE(p->on_rq);
+		proxy_dequeue_from_owner(p);
+		clear_task_blocked_on(p, NULL);
+		return true;
+	}
+
 	/*
 	 * Typically per __set_task_cpu(), task_cpu(p) == p->wake_cpu.
 	 *
@@ -3922,10 +4065,34 @@ ttwu_do_activate(struct rq *rq, struct task_struct *p, int wake_flags,
  */
 static int ttwu_runnable(struct task_struct *p, int wake_flags)
 {
-	ACQUIRE(__task_rq_lock, guard)(p);
-	struct rq *rq = guard.rq;
+	struct rq *rq;
 
-	if (!task_on_rq_queued(p))
+	if (sched_proxy_exec() && READ_ONCE(p->is_linked)) {
+		/*
+		 * If p->is_linked put us on the ttwu_runnable() path,
+		 * try to de-link the blocked donor outside the
+		 * __task_rq_lock() first.
+		 *
+		 * If the task state changed, a wakeup raced with
+		 * ttwu_runnable() (see proxy_try_dequeue_from_owner()
+		 * for interleaving). Try again with rq_lock held where
+		 * state is guaranteed to be stable.
+		 */
+		if (proxy_try_dequeue_from_owner(p)) {
+			WARN_ON_ONCE(READ_ONCE(p->on_rq));
+			clear_task_blocked_on(p, NULL);
+			return 0;
+		}
+	}
+
+	ACQUIRE(__task_rq_lock, guard)(p);
+	rq = guard.rq;
+
+	/*
+	 * schedule() managed to block the task and there is
+	 * no unlinking needed. Continue with wakeup.
+	 */
+	if (!p->needs_rq_sync)
 		return 0;
 
 	update_rq_clock(rq);
@@ -6972,6 +7139,11 @@ static void proxy_enqueue_on_owner(struct rq *rq, struct task_struct *owner,
 	WARN_ON(!p->on_rq);
 	WARN_ON(p->sleeping_owner);
 
+	/*
+	 * See __proxy_block_task() on how p->blocked_cpu is used
+	 * to re-direct the task to a handler CPU when
+	 */
+	WRITE_ONCE(p->blocked_cpu, READ_ONCE(owner->blocked_cpu));
 	WRITE_ONCE(p->sleeping_owner, owner);
 	list_add(&p->blocked_node, &owner->blocked_head);
 	WRITE_ONCE(p->is_linked, 1);
