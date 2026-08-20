@@ -2247,6 +2247,8 @@ void activate_task(struct rq *rq, struct task_struct *p, int en_flags)
 
 #ifdef CONFIG_SCHED_PROXY_EXEC
 
+static inline void proxy_set_task_cpu(struct task_struct *p, int cpu);
+
 static void __proxy_dequeue_from_owner(struct task_struct *p)
 {
 	list_del_init(&p->blocked_node);
@@ -2337,6 +2339,183 @@ static bool proxy_try_dequeue_from_owner(struct task_struct *p)
 	return true;
 }
 
+static void
+proxy_activate_blocked_task(struct rq *rq, struct task_struct *p, int en_flags)
+{
+	int iowait_count = 0, load_contrib_count = 0;
+	struct task_struct *donor, *owner, *tmp;
+	int blocked_cpu, this_cpu = cpu_of(rq);
+	LIST_HEAD(migration_head);
+	LIST_HEAD(wakeup_head);
+	struct rq *blocked_rq;
+	bool needs_migration;
+
+	WRITE_ONCE(p->on_rq, TASK_ON_RQ_MIGRATING);
+	ASSERT_EXCLUSIVE_WRITER(p->on_rq);
+
+	/*
+	 * Pairs against smp_mb() in proxy_enqueue_on_owner() which
+	 * orders ownwer->on_rq state against the blocked_head addition.
+	 */
+	smp_mb();
+
+	/*
+	 * Fast-path: Tasks blocking on us will see p->on_rq updated and
+	 * will bail out natturally in proxy_enqueue_on_owner().
+	 *
+	 * proxy_enqueue_on_owner() holds the wait_lock to prevent owner
+	 * from running and disappearing before the transient task can
+	 * observe p->on_rq change and dequeue itself.
+	 */
+	if (list_empty(&p->blocked_head)) {
+		__activate_task(rq, p, en_flags);
+		return;
+	}
+
+	/*
+	 * Slow-path: Since we need to wakeup tasks (and task queued on
+	 * them, and task queued on them, and ... you get the gist) we
+	 * need to grab some locks.
+	 *
+	 * Lucky for us, we have simplified this via p->blocked_cpu
+	 * which is the task_cpu() for the entire chain. Wakeup is
+	 * broken into two parts.
+	 *
+	 * Part1: Under the rq_lock + blocked lock, mark all tasks on
+	 * the chain as TASK_ON_RQ_MIGRATING in breadth-first manner.
+	 *
+	 * Part2: Active all the tasks in bulk.
+	 */
+
+	/* Part 1: Prepare the blocked donor chain. */
+	blocked_cpu = p->blocked_cpu;
+	blocked_rq = cpu_rq(blocked_cpu);
+
+	/*
+	 * Blocked chain is linked to a different rq. Drop the rq_lock
+	 * and migrate the chain over before wkaing it up here.
+	 */
+	needs_migration = blocked_rq != rq;
+	if (needs_migration) {
+		raw_spin_rq_unlock(rq);
+		raw_spin_rq_lock(blocked_rq);
+	}
+
+	owner = p;
+
+	do {
+		guard(raw_spinlock)(&owner->blocked_lock);
+
+		/* Iterate the tasks blocked on this owner. */
+		list_for_each_entry_safe(donor, tmp, &owner->blocked_head, blocked_node) {
+			/* Everything hinges on this assumption. */
+			WARN_ON_ONCE(task_cpu(donor) != blocked_cpu);
+			WARN_ON_ONCE(donor->se.sched_delayed);
+
+			WRITE_ONCE(donor->on_rq, TASK_ON_RQ_MIGRATING);
+			ASSERT_EXCLUSIVE_WRITER(donor->on_rq);
+
+			if (donor->in_iowait) {
+				delayacct_blkio_end(donor);
+				iowait_count++;
+			}
+
+			if (donor->sched_contributes_to_load)
+				load_contrib_count++;
+
+			/*
+			 * Pairs against the smp_mb() in proxy_enqueue_on_owner().
+			 * See the comment at the beginning of the function.
+			 */
+			smp_mb();
+
+			/*
+			 * If the donor has more task queued on it,
+			 * add it to the migration list else directly
+			 * queue it onto the wakeup list.
+			 */
+			if (!list_empty(&donor->blocked_head)) {
+				list_move_tail(&donor->blocked_node, &migration_head);
+			} else {
+				list_move_tail(&donor->blocked_node, &wakeup_head);
+			}
+		}
+
+		owner = list_first_entry_or_null(&migration_head,
+						 typeof(*owner),
+						 blocked_node);
+
+		/*
+		 * Move the owner to the wakeup list before preparing
+		 * the sub-chain queued on it.
+		 */
+		if (owner)
+			list_move_tail(&owner->blocked_node, &wakeup_head);
+
+	} while (owner);
+
+	/* Part 2: Bulk wakeup */
+
+	atomic_sub(iowait_count, &blocked_rq->nr_iowait);
+
+	if (needs_migration) {
+		raw_spin_rq_unlock(blocked_rq);
+		raw_spin_rq_lock(rq);
+
+		update_rq_clock(rq);
+		en_flags |= ENQUEUE_NOCLOCK;
+	}
+
+	rq->nr_uninterruptible -= load_contrib_count;
+
+	if (!(en_flags & ENQUEUE_NOCLOCK)) {
+		update_rq_clock(rq);
+		en_flags |= ENQUEUE_NOCLOCK;
+	}
+
+	/* Activate the top owner first. */
+	__activate_task(rq, p, en_flags);
+
+	/*
+	 * Add ENQUEUE_MIGRATED for all tasks on the chain
+	 * since they are all sched_migrated_on_blocking
+	 * and have skipped ->migrate_task_rq() callback.
+	 */
+	en_flags |= ENQUEUE_MIGRATING;
+
+	list_for_each_entry_safe(donor, tmp, &wakeup_head, blocked_node) {
+		__proxy_dequeue_from_owner(donor);
+
+		/*
+		 * Correct the task_cpu() before activating.
+		 *
+		 * Since chain preparation already adds enough barrier
+		 * after storing p->on_rq = MIGRATING, no additional
+		 * barriers are required after modifying p->is_linked
+		 * via __proxy_dequeue_from_owner() above.
+		 */
+		if (needs_migration)
+			proxy_set_task_cpu(donor, this_cpu);
+
+		__activate_task(rq, donor, en_flags);
+		wakeup_preempt(rq, donor, en_flags);
+		/*
+		 * Blocked tasks do not add push callbacks and it is
+		 * safe to skip calling ->task_woken() here.
+		 */
+	}
+}
+
+static void activate_blocked_task(struct rq *rq, struct task_struct *p, int en_flags)
+{
+	if (!sched_proxy_exec()) {
+		__activate_task(rq, p, en_flags);
+		return;
+	}
+
+	proxy_activate_blocked_task(rq, p, en_flags);
+}
+
 #else /* !CONFIG_SCHED_PROXY_EXEC */
 
 static bool proxy_try_dequeue_from_owner(struct task_struct *p)
@@ -2344,12 +2523,12 @@ static bool proxy_try_dequeue_from_owner(struct task_struct *p)
 	return false;
 }
 
-#endif /* CONFIG_SCHED_PROXY_EXEC */
-
 static void activate_blocked_task(struct rq *rq, struct task_struct *p, int en_flags)
 {
 	__activate_task(rq, p, en_flags);
 }
+
+#endif /* CONFIG_SCHED_PROXY_EXEC */
 
 void deactivate_task(struct rq *rq, struct task_struct *p, int flags)
 {
