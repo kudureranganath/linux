@@ -852,9 +852,23 @@ struct task_struct {
 	struct alloc_tag		*alloc_tag;
 #endif
 
+	union {
+		struct {
+			u8		on_rq;
+			u8		is_linked;
+		};
+		/*
+		 * Allows inspecting on_rq and is_linked
+		 * atomically with a single read outside
+		 * the task_rq_lock().
+		 *
+		 * See the comment above the load in
+		 * try_to_wake_up() for ordering
+		 * guarantees.
+		 */
+		u16			needs_rq_sync;
+	};
 	u8				on_cpu;
-	u8				on_rq;
-	u8				is_linked;
 	u8				is_blocked;
 
 	struct __call_single_node	wake_entry;

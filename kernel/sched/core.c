@@ -2171,12 +2171,16 @@ unsigned long get_wchan(struct task_struct *p)
 		return 0;
 
 	/* Only get wchan if task is blocked and we can keep it that way. */
-	raw_spin_lock_irq(&p->pi_lock);
+	guard(raw_spinlock_irq)(&p->pi_lock);
+
 	state = READ_ONCE(p->__state);
+	if (state == TASK_RUNNING || state == TASK_WAKING)
+		return 0;
+
 	smp_rmb(); /* see try_to_wake_up() */
-	if (state != TASK_RUNNING && state != TASK_WAKING && !p->on_rq)
+
+	if (!READ_ONCE(p->needs_rq_sync))
 		ip = __get_wchan(p);
-	raw_spin_unlock_irq(&p->pi_lock);
 
 	return ip;
 }
@@ -4365,10 +4369,49 @@ int try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 		 * Pairs with the LOCK+smp_mb__after_spinlock() on rq->lock in
 		 * __schedule().  See the comment for smp_mb__after_spinlock().
 		 *
+		 * Additionally, this also guards against activation of blocked
+		 * donors queued on a sleeping owner when a wakeup races for
+		 * the same task with sched_proxy_exec().
+		 *
+		 * proxy_enqueue_on_owner()
+		 *   STORE p->is_linked = 1
+		 *
+		 *   block_task()			try_to_wake_up()
+		 *     smp_mb()
+		 *     STRORE p->on_rq = 0		  LOAD p->needs_rq_sync
+		 *
+		 * The read below will atomically observe either p->on_rq or
+		 * p->is_linked being set and put the task on ttwu_runnable()
+		 * path.
+		 *
+		 * On the chain-wakeup path, p->on_rq is first transitioned to
+		 * TASK_ON_RQ_MIGRATING before p->is_linked is cleared and the
+		 * task is transitioned to TASK_ON_RQ_QUEUED
+		 *
+		 * activate_blocked_task()
+		 *   task_rq_lock()			ttwu_runnable()
+		 *   STORE donor->on_rq = MIGRATING	  task_rq_lock()
+		 *					    # STALL
+		 *   smp_wmb();
+		 *
+		 *   proxy_dequeue_from_owner()
+		 *     STORE donor->is_linked = 0
+		 *
+		 *   activate_task()
+		 *     STORE donor->on_rq = QUEUED
+		 *
+		 *   rq_unlock()			    # ACQUIRED
+		 *					  LOAD donor->needs_rq_sync
+		 *
+		 * In this case too try_to_wake_up() will correctly observe
+		 * either p->on_rq != 0 or p->is_linked != 0 by atomically
+		 * reading p->needs_rq_sync when the task is being activated as
+		 * a part of chain wakeup.
+		 *
 		 * A similar smp_rmb() lives in __task_needs_rq_lock().
 		 */
 		smp_rmb();
-		if (READ_ONCE(p->on_rq) && ttwu_runnable(p, wake_flags))
+		if (READ_ONCE(p->needs_rq_sync) && ttwu_runnable(p, wake_flags))
 			break;
 
 		/*
@@ -4488,7 +4531,7 @@ static bool __task_needs_rq_lock(struct task_struct *p)
 	 * See try_to_wake_up() for a longer comment.
 	 */
 	smp_rmb();
-	if (p->on_rq)
+	if (READ_ONCE(p->needs_rq_sync))
 		return true;
 
 	/*
