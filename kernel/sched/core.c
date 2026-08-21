@@ -2285,6 +2285,10 @@ static void block_task(struct rq *rq, struct task_struct *p, unsigned long task_
 		!(task_state & TASK_NOLOAD) &&
 		!(task_state & TASK_FROZEN);
 
+	p->sched_migrated_on_blocking = !!p->is_linked;
+	if (p->is_linked)
+		flags |= DEQUEUE_MIGRATING;
+
 	if (unlikely(is_special_task_state(task_state)))
 		flags |= DEQUEUE_SPECIAL;
 
@@ -3415,7 +3419,7 @@ void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 	trace_sched_migrate_task(p, new_cpu);
 
 	if (task_cpu(p) != new_cpu) {
-		if (p->sched_class->migrate_task_rq)
+		if (!p->sched_migrated_on_blocking && p->sched_class->migrate_task_rq)
 			p->sched_class->migrate_task_rq(p, new_cpu);
 		p->se.nr_migrations++;
 		perf_event_task_migrate(p);
@@ -3862,6 +3866,9 @@ ttwu_do_activate(struct rq *rq, struct task_struct *p, int wake_flags,
 
 	if (p->sched_contributes_to_load)
 		rq->nr_uninterruptible--;
+
+	if (p->sched_migrated_on_blocking)
+		en_flags |= ENQUEUE_MIGRATING;
 
 	if (wake_flags & WF_RQ_SELECTED)
 		en_flags |= ENQUEUE_RQ_SELECTED;
