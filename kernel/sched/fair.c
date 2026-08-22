@@ -5654,7 +5654,7 @@ static inline void update_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *s
 	decayed  = update_cfs_rq_load_avg(now, cfs_rq);
 	decayed |= propagate_entity_load_avg(se);
 
-	if (!se->avg.last_update_time && (flags & DO_ATTACH)) {
+	if (flags & DO_ATTACH) {
 
 		/*
 		 * DO_ATTACH means we're here from enqueue_entity().
@@ -6110,6 +6110,7 @@ static void
 enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
 	bool curr = cfs_rq->curr == se;
+	int action = UPDATE_TG;
 
 	/*
 	 * If we're the current task, we must renormalise before calling
@@ -6120,6 +6121,11 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 
 	update_curr(cfs_rq);
 
+	if (flags & (ENQUEUE_MIGRATING | ENQUEUE_MIGRATED | ENQUEUE_INITIAL))
+		action |= DO_ATTACH;
+	else
+		WARN_ON_ONCE(!se->avg.last_update_time);
+
 	/*
 	 * When enqueuing a sched_entity, we must:
 	 *   - Update loads to have both entity and cfs_rq synced with now.
@@ -6129,7 +6135,7 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	 *     its group cfs_rq
 	 *   - Add its new weight to cfs_rq->load.weight
 	 */
-	update_load_avg(cfs_rq, se, UPDATE_TG | DO_ATTACH);
+	update_load_avg(cfs_rq, se, action);
 	se_update_runnable(se);
 	/*
 	 * XXX update_load_avg() above will have attached us to the pelt sum;
