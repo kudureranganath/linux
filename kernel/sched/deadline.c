@@ -471,7 +471,7 @@ static void task_contending(struct sched_dl_entity *dl_se, int flags)
 	 * If this is a non-deadline task that has been boosted,
 	 * do nothing
 	 */
-	if (dl_se->dl_runtime == 0)
+	if (dl_se->dl_runtime == 0 || (flags & ENQUEUE_MIGRATING))
 		return;
 
 	if (flags & ENQUEUE_MIGRATED)
@@ -2477,8 +2477,13 @@ static void dequeue_dl_entity(struct sched_dl_entity *dl_se, int flags)
 	 * way, because from GRUB's point of view the same thing is happening
 	 * (the task moves from "active contending" to "active non contending"
 	 * or "inactive")
+	 *
+	 * XXX: Proxy execution can block task with DEQUEUE_MIGRATING and
+	 * switch the task_cpu() underneath without going through
+	 * migrate_task_rq_dl(). Do not leave any bandwidth or timer reference
+	 * back when DEQUEUE_SLEEP is coupled with DEQUEUE_MIGRATING
 	 */
-	if (flags & DEQUEUE_SLEEP)
+	if ((flags & (DEQUEUE_SLEEP|DEQUEUE_MIGRATING)) == DEQUEUE_SLEEP)
 		task_non_contending(dl_se, true);
 }
 
